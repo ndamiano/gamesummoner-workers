@@ -17,6 +17,7 @@ logger = logging.getLogger("worker")
 HEARTBEAT_INTERVAL = 45.0
 BOOT_POLL_INTERVAL = 2.0
 POLL_INTERVAL = 1.0
+CLAIM_WAIT_SECONDS = 2.0
 DEFAULT_IMAGE_URL = "http://127.0.0.1:8700"
 
 
@@ -47,9 +48,9 @@ class Agent:
         body = {
             "worker_id": self.worker_id,
             "queue": self.queue,
-            "wait_seconds": 0
+            "wait_seconds": min(CLAIM_WAIT_SECONDS, self.idle_exit_seconds)
         }
-        return self._post("/worker/claim", body, timeout=10).get("job")
+        return self._post("/worker/claim", body, timeout=body["wait_seconds"] + 10).get("job")
 
     def deregister(self) -> None:
         try:
@@ -135,9 +136,10 @@ class Agent:
                 logger.warning("image is not available (%s) — pausing claims", reason)
                 time.sleep(POLL_INTERVAL)
                 continue
-            if len(self._running) >= self.slots:
-                time.sleep(POLL_INTERVAL)
-                continue
+            with self._running_lock:
+                if not self._running_lock.wait_for(lambda: len(self._running) < self.slots,
+                                                   timeout=POLL_INTERVAL):
+                    continue
 
             try:
                 job = self.claim()
@@ -160,7 +162,6 @@ class Agent:
                 if idle_for >= self.idle_exit_seconds:
                     logger.info("worker %s idle for %.0fs — exiting", self.worker_id, idle_for)
                     return
-            time.sleep(POLL_INTERVAL)
 
     def wait_for_image(self) -> bool:
         """Block until the image is healthy. False when it will never serve (leaving or broken)."""

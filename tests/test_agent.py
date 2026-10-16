@@ -255,6 +255,33 @@ def test_claims_stop_while_every_slot_is_full_and_resume_when_one_frees():
     assert posts_to(a, "/worker/complete") == 2
 
 
+def test_claims_long_poll_and_a_freed_slot_claims_without_waiting_out_the_poll(monkeypatch):
+    monkeypatch.setattr(worker_agent, "POLL_INTERVAL", 5)
+    a = make_agent(FakeImage(), slots=1)
+    handed = ["j1", "j2"]
+    claimed_at, done_at, bodies = {}, {}, []
+
+    def post(url, **kw):
+        if url.endswith("/worker/claim"):
+            bodies.append((kw["json"]["wait_seconds"], kw["timeout"]))
+            if handed:
+                job_id = handed.pop(0)
+                claimed_at[job_id] = time.monotonic()
+                return FakeResponse(200, {"job": {"id": job_id, "payload": {"kind": "llm"}}})
+            a.stopping = True
+            return FakeResponse(200, {"job": None})
+        if url.endswith("/worker/complete"):
+            done_at[kw["json"]["job_id"]] = time.monotonic()
+        return FakeResponse(200, {"ok": True})
+
+    a.session.post.side_effect = post
+    a.run()
+    assert set(bodies) == {(worker_agent.CLAIM_WAIT_SECONDS,
+                            worker_agent.CLAIM_WAIT_SECONDS + 10)}
+    assert claimed_at["j2"] - claimed_at["j1"] < 1
+    assert set(done_at) == {"j1", "j2"}
+
+
 def test_claims_pause_while_the_image_takes_no_work():
     image = FakeImage(health=[(Health.HEALTHY, ""), (Health.BUSY, "queue full"),
                               (Health.HEALTHY, "")])
